@@ -4,6 +4,7 @@ from pymongo import MongoClient
 from datetime import datetime
 import os
 from bson import ObjectId
+import certifi
 
 app = FastAPI(title="DUO-LINER API")
 
