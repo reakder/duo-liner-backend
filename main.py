@@ -21,7 +21,13 @@ DB_NAME = os.getenv("DB_NAME", "duoliner_db")
 if not MONGO_URI:
     raise Exception("Falta la variable MONGODB_URI")
 
-client = MongoClient(MONGO_URI)
+import certifi
+
+client = MongoClient(
+    MONGO_URI,
+    tls=True,
+    tlsCAFile=certifi.where()
+)
 db = client[DB_NAME]
 
 
