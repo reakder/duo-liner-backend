@@ -80,17 +80,77 @@ def listar_contactos():
     return [clean_doc(x) for x in db.contactos_web.find().sort("fecha", -1)]
 
 
+def siguiente_numero_cotizacion():
+    last = db.cotizaciones.find_one({"numero": {"$regex": "^COT-"}}, sort=[("numero", -1)])
+    if not last or not last.get("numero"):
+        return "COT-000001"
+    try:
+        actual = int(str(last["numero"]).replace("COT-", ""))
+    except Exception:
+        actual = db.cotizaciones.count_documents({})
+    return f"COT-{actual + 1:06d}"
+
+
 @app.post("/cotizaciones")
 def crear_cotizacion(data: dict):
-    data["fecha"] = datetime.utcnow().isoformat()
+    fecha = data.get("fecha", datetime.utcnow().date().isoformat())
+    if not data.get("numero"):
+        data["numero"] = siguiente_numero_cotizacion()
+    data["fecha"] = fecha
+    data["fecha_creacion"] = datetime.utcnow().isoformat()
+    data["vigencia_dias"] = int(data.get("vigencia_dias", 15))
+    try:
+        from datetime import timedelta
+        fecha_dt = datetime.fromisoformat(str(fecha)[:10])
+        data["vigencia_hasta"] = (fecha_dt + timedelta(days=data["vigencia_dias"])).date().isoformat()
+    except Exception:
+        data["vigencia_hasta"] = data.get("vigencia_hasta", "")
     data["estado"] = data.get("estado", "Pendiente")
+    data["iva_incluido"] = bool(data.get("iva_incluido", True))
+    data["cantidad"] = float(data.get("cantidad", 0) or 0)
+    data["precio"] = float(data.get("precio", 0) or 0)
+    data["total"] = float(data.get("total", data["cantidad"] * data["precio"]) or 0)
+    data["leyenda_iva"] = "Precio incluye IVA" if data["iva_incluido"] else "Precio no incluye IVA"
+    data["origen"] = data.get("origen", "portal")
     result = db.cotizaciones.insert_one(data)
-    return {"success": True, "id": str(result.inserted_id)}
+    return {"success": True, "id": str(result.inserted_id), "numero": data["numero"]}
 
 
 @app.get("/cotizaciones")
 def listar_cotizaciones():
-    return [clean_doc(x) for x in db.cotizaciones.find().sort("fecha", -1)]
+    return [clean_doc(x) for x in db.cotizaciones.find().sort("fecha_creacion", -1)]
+
+
+@app.put("/cotizaciones/{item_id}")
+def actualizar_cotizacion(item_id: str, data: dict):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    if "cantidad" in data:
+        data["cantidad"] = float(data.get("cantidad") or 0)
+    if "precio" in data:
+        data["precio"] = float(data.get("precio") or 0)
+    if "total" not in data and ("cantidad" in data or "precio" in data):
+        actual = db.cotizaciones.find_one({"_id": oid}) or {}
+        cantidad = float(data.get("cantidad", actual.get("cantidad", 0)) or 0)
+        precio = float(data.get("precio", actual.get("precio", 0)) or 0)
+        data["total"] = cantidad * precio
+    if "iva_incluido" in data:
+        data["iva_incluido"] = bool(data.get("iva_incluido"))
+        data["leyenda_iva"] = "Precio incluye IVA" if data["iva_incluido"] else "Precio no incluye IVA"
+    db.cotizaciones.update_one({"_id": oid}, {"$set": data})
+    return {"success": True}
+
+
+@app.delete("/cotizaciones/{item_id}")
+def eliminar_cotizacion(item_id: str):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    db.cotizaciones.delete_one({"_id": oid})
+    return {"success": True}
 
 
 # =========================
