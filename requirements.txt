@@ -4,3 +4,9 @@ pymongo==4.6.3
 dnspython
 python-dotenv
 certifi
+fastapi
+uvicorn
+pymongo
+certifi
+python-jose[cryptography]
+passlib[bcrypt]
