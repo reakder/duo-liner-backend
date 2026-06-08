@@ -36,7 +36,8 @@ db = client[DB_NAME]
 # =========================
 # SEGURIDAD / USUARIOS
 # =========================
-SECRET_KEY = os.getenv("SECRET_KEY", "cambia-esta-clave-en-render")
+
+SECRET_KEY = os.getenv("SECRET_KEY", "duo-liner-cambiar-esta-clave-en-render")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "720"))
 
@@ -69,7 +70,12 @@ def get_current_user(authorization: str = Header(default="")):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-    user = db.usuarios.find_one({"_id": ObjectId(user_id), "activo": True})
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    user = db.usuarios.find_one({"_id": oid, "activo": True})
     if not user:
         raise HTTPException(status_code=401, detail="Usuario inválido")
 
@@ -107,7 +113,11 @@ def auth_login(data: dict):
     if not user or not verify_password(password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
 
-    token = create_access_token({"sub": str(user["_id"]), "usuario": user["usuario"], "rol": user.get("rol", "usuario")})
+    token = create_access_token({
+        "sub": str(user["_id"]),
+        "usuario": user["usuario"],
+        "rol": user.get("rol", "usuario")
+    })
 
     return {
         "access_token": token,
@@ -116,6 +126,17 @@ def auth_login(data: dict):
         "nombre": user.get("nombre", ""),
         "rol": user.get("rol", "usuario"),
         "debe_cambiar_password": user.get("debe_cambiar_password", False)
+    }
+
+
+@app.get("/auth/me")
+def auth_me(user=Depends(get_current_user)):
+    return {
+        "id": str(user["_id"]),
+        "usuario": user.get("usuario", ""),
+        "nombre": user.get("nombre", ""),
+        "rol": user.get("rol", "usuario"),
+        "activo": user.get("activo", True)
     }
 
 
@@ -138,18 +159,26 @@ def listar_usuarios(user=Depends(require_admin)):
 def crear_usuario(data: dict, user=Depends(require_admin)):
     usuario = str(data.get("usuario", "")).strip().lower()
     password = str(data.get("password", "")).strip()
+    nombre = str(data.get("nombre", usuario)).strip()
+    rol = str(data.get("rol", "usuario")).strip()
+
+    if rol not in ["admin", "usuario"]:
+        raise HTTPException(status_code=400, detail="Rol inválido")
 
     if not usuario or not password:
         raise HTTPException(status_code=400, detail="Usuario y contraseña son requeridos")
+
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener mínimo 8 caracteres")
 
     if db.usuarios.find_one({"usuario": usuario}):
         raise HTTPException(status_code=400, detail="El usuario ya existe")
 
     result = db.usuarios.insert_one({
         "usuario": usuario,
-        "nombre": data.get("nombre", usuario),
+        "nombre": nombre,
         "password_hash": hash_password(password),
-        "rol": data.get("rol", "usuario"),
+        "rol": rol,
         "activo": bool(data.get("activo", True)),
         "fecha": datetime.utcnow().isoformat(),
         "debe_cambiar_password": False
@@ -165,16 +194,81 @@ def actualizar_usuario(item_id: str, data: dict, user=Depends(require_admin)):
     except Exception:
         raise HTTPException(status_code=400, detail="ID inválido")
 
+    target = db.usuarios.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
     update = {}
-    for key in ["nombre", "rol", "activo"]:
-        if key in data:
-            update[key] = data[key]
+
+    if "nombre" in data:
+        update["nombre"] = str(data.get("nombre", "")).strip()
+
+    if "rol" in data:
+        rol = str(data.get("rol", "usuario")).strip()
+        if rol not in ["admin", "usuario"]:
+            raise HTTPException(status_code=400, detail="Rol inválido")
+        update["rol"] = rol
+
+    if "activo" in data:
+        update["activo"] = bool(data.get("activo"))
 
     if data.get("password"):
-        update["password_hash"] = hash_password(str(data["password"]))
+        password = str(data.get("password")).strip()
+        if len(password) < 8:
+            raise HTTPException(status_code=400, detail="La contraseña debe tener mínimo 8 caracteres")
+        update["password_hash"] = hash_password(password)
         update["debe_cambiar_password"] = False
 
-    db.usuarios.update_one({"_id": oid}, {"$set": update})
+    if update:
+        db.usuarios.update_one({"_id": oid}, {"$set": update})
+
+    return {"success": True}
+
+
+@app.delete("/usuarios/{item_id}")
+def eliminar_usuario(item_id: str, user=Depends(require_admin)):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    if str(user["_id"]) == item_id:
+        raise HTTPException(status_code=400, detail="No puedes desactivar tu propio usuario")
+
+    db.usuarios.update_one({"_id": oid}, {"$set": {"activo": False}})
+    return {"success": True}
+
+
+@app.put("/usuarios/{item_id}/activar")
+def activar_usuario(item_id: str, user=Depends(require_admin)):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    db.usuarios.update_one({"_id": oid}, {"$set": {"activo": True}})
+    return {"success": True}
+
+
+@app.put("/auth/cambiar-password")
+def cambiar_mi_password(data: dict, user=Depends(get_current_user)):
+    actual = str(data.get("actual", ""))
+    nueva = str(data.get("nueva", ""))
+
+    if not verify_password(actual, user.get("password_hash", "")):
+        raise HTTPException(status_code=400, detail="Contraseña actual incorrecta")
+
+    if len(nueva) < 8:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe tener mínimo 8 caracteres")
+
+    db.usuarios.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "password_hash": hash_password(nueva),
+            "debe_cambiar_password": False
+        }}
+    )
+
     return {"success": True}
 
 
@@ -186,7 +280,7 @@ def clean_doc(doc):
 
 
 def get_collection(name: str):
-    allowed = ["clientes", "pedidos", "pagos", "cotizaciones", "contactos_web", "productos"]
+    allowed = ["clientes", "pedidos", "pagos", "cotizaciones", "contactos_web", "productos", "usuarios"]
     if name not in allowed:
         raise HTTPException(status_code=400, detail="Colección no permitida")
     return db[name]
