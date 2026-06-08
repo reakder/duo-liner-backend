@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 import os
 import certifi
+from passlib.context import CryptContext
+from jose import jwt, JWTError
 
 app = FastAPI(title="DUO-LINER API")
 
@@ -30,6 +32,151 @@ client = MongoClient(
 )
 
 db = client[DB_NAME]
+
+# =========================
+# SEGURIDAD / USUARIOS
+# =========================
+SECRET_KEY = os.getenv("SECRET_KEY", "cambia-esta-clave-en-render")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "720"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str):
+    return pwd_context.verify(password, password_hash)
+
+
+def create_access_token(data: dict):
+    payload = data.copy()
+    payload["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(authorization: str = Header(default="")):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="No autorizado")
+
+    token = authorization.replace("Bearer ", "").strip()
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    user = db.usuarios.find_one({"_id": ObjectId(user_id), "activo": True})
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuario inválido")
+
+    return user
+
+
+def require_admin(user=Depends(get_current_user)):
+    if user.get("rol") != "admin":
+        raise HTTPException(status_code=403, detail="Solo administradores")
+    return user
+
+
+def ensure_initial_admin():
+    if db.usuarios.count_documents({}) == 0:
+        db.usuarios.insert_one({
+            "usuario": "admin",
+            "nombre": "Administrador",
+            "password_hash": hash_password("CambiaEstaClave123"),
+            "rol": "admin",
+            "activo": True,
+            "fecha": datetime.utcnow().isoformat(),
+            "debe_cambiar_password": True
+        })
+
+
+ensure_initial_admin()
+
+
+@app.post("/auth/login")
+def auth_login(data: dict):
+    usuario = str(data.get("usuario", "")).strip().lower()
+    password = str(data.get("password", ""))
+
+    user = db.usuarios.find_one({"usuario": usuario, "activo": True})
+    if not user or not verify_password(password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
+
+    token = create_access_token({"sub": str(user["_id"]), "usuario": user["usuario"], "rol": user.get("rol", "usuario")})
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "usuario": user["usuario"],
+        "nombre": user.get("nombre", ""),
+        "rol": user.get("rol", "usuario"),
+        "debe_cambiar_password": user.get("debe_cambiar_password", False)
+    }
+
+
+@app.get("/usuarios")
+def listar_usuarios(user=Depends(require_admin)):
+    return [
+        {
+            "id": str(x["_id"]),
+            "usuario": x.get("usuario", ""),
+            "nombre": x.get("nombre", ""),
+            "rol": x.get("rol", "usuario"),
+            "activo": x.get("activo", True),
+            "fecha": x.get("fecha", "")
+        }
+        for x in db.usuarios.find().sort("usuario", 1)
+    ]
+
+
+@app.post("/usuarios")
+def crear_usuario(data: dict, user=Depends(require_admin)):
+    usuario = str(data.get("usuario", "")).strip().lower()
+    password = str(data.get("password", "")).strip()
+
+    if not usuario or not password:
+        raise HTTPException(status_code=400, detail="Usuario y contraseña son requeridos")
+
+    if db.usuarios.find_one({"usuario": usuario}):
+        raise HTTPException(status_code=400, detail="El usuario ya existe")
+
+    result = db.usuarios.insert_one({
+        "usuario": usuario,
+        "nombre": data.get("nombre", usuario),
+        "password_hash": hash_password(password),
+        "rol": data.get("rol", "usuario"),
+        "activo": bool(data.get("activo", True)),
+        "fecha": datetime.utcnow().isoformat(),
+        "debe_cambiar_password": False
+    })
+
+    return {"success": True, "id": str(result.inserted_id)}
+
+
+@app.put("/usuarios/{item_id}")
+def actualizar_usuario(item_id: str, data: dict, user=Depends(require_admin)):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    update = {}
+    for key in ["nombre", "rol", "activo"]:
+        if key in data:
+            update[key] = data[key]
+
+    if data.get("password"):
+        update["password_hash"] = hash_password(str(data["password"]))
+        update["debe_cambiar_password"] = False
+
+    db.usuarios.update_one({"_id": oid}, {"$set": update})
+    return {"success": True}
+
 
 
 def clean_doc(doc):
@@ -80,77 +227,17 @@ def listar_contactos():
     return [clean_doc(x) for x in db.contactos_web.find().sort("fecha", -1)]
 
 
-def siguiente_numero_cotizacion():
-    last = db.cotizaciones.find_one({"numero": {"$regex": "^COT-"}}, sort=[("numero", -1)])
-    if not last or not last.get("numero"):
-        return "COT-000001"
-    try:
-        actual = int(str(last["numero"]).replace("COT-", ""))
-    except Exception:
-        actual = db.cotizaciones.count_documents({})
-    return f"COT-{actual + 1:06d}"
-
-
 @app.post("/cotizaciones")
 def crear_cotizacion(data: dict):
-    fecha = data.get("fecha", datetime.utcnow().date().isoformat())
-    if not data.get("numero"):
-        data["numero"] = siguiente_numero_cotizacion()
-    data["fecha"] = fecha
-    data["fecha_creacion"] = datetime.utcnow().isoformat()
-    data["vigencia_dias"] = int(data.get("vigencia_dias", 15))
-    try:
-        from datetime import timedelta
-        fecha_dt = datetime.fromisoformat(str(fecha)[:10])
-        data["vigencia_hasta"] = (fecha_dt + timedelta(days=data["vigencia_dias"])).date().isoformat()
-    except Exception:
-        data["vigencia_hasta"] = data.get("vigencia_hasta", "")
+    data["fecha"] = datetime.utcnow().isoformat()
     data["estado"] = data.get("estado", "Pendiente")
-    data["iva_incluido"] = bool(data.get("iva_incluido", True))
-    data["cantidad"] = float(data.get("cantidad", 0) or 0)
-    data["precio"] = float(data.get("precio", 0) or 0)
-    data["total"] = float(data.get("total", data["cantidad"] * data["precio"]) or 0)
-    data["leyenda_iva"] = "Precio incluye IVA" if data["iva_incluido"] else "Precio no incluye IVA"
-    data["origen"] = data.get("origen", "portal")
     result = db.cotizaciones.insert_one(data)
-    return {"success": True, "id": str(result.inserted_id), "numero": data["numero"]}
+    return {"success": True, "id": str(result.inserted_id)}
 
 
 @app.get("/cotizaciones")
 def listar_cotizaciones():
-    return [clean_doc(x) for x in db.cotizaciones.find().sort("fecha_creacion", -1)]
-
-
-@app.put("/cotizaciones/{item_id}")
-def actualizar_cotizacion(item_id: str, data: dict):
-    try:
-        oid = ObjectId(item_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="ID inválido")
-    if "cantidad" in data:
-        data["cantidad"] = float(data.get("cantidad") or 0)
-    if "precio" in data:
-        data["precio"] = float(data.get("precio") or 0)
-    if "total" not in data and ("cantidad" in data or "precio" in data):
-        actual = db.cotizaciones.find_one({"_id": oid}) or {}
-        cantidad = float(data.get("cantidad", actual.get("cantidad", 0)) or 0)
-        precio = float(data.get("precio", actual.get("precio", 0)) or 0)
-        data["total"] = cantidad * precio
-    if "iva_incluido" in data:
-        data["iva_incluido"] = bool(data.get("iva_incluido"))
-        data["leyenda_iva"] = "Precio incluye IVA" if data["iva_incluido"] else "Precio no incluye IVA"
-    db.cotizaciones.update_one({"_id": oid}, {"$set": data})
-    return {"success": True}
-
-
-@app.delete("/cotizaciones/{item_id}")
-def eliminar_cotizacion(item_id: str):
-    try:
-        oid = ObjectId(item_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="ID inválido")
-    db.cotizaciones.delete_one({"_id": oid})
-    return {"success": True}
+    return [clean_doc(x) for x in db.cotizaciones.find().sort("fecha", -1)]
 
 
 # =========================
