@@ -5,4 +5,4 @@ dnspython
 python-dotenv
 certifi
 python-jose[cryptography]
-passlib[bcrypt]
+passlib
