@@ -334,6 +334,33 @@ def listar_cotizaciones():
     return [clean_doc(x) for x in db.cotizaciones.find().sort("fecha", -1)]
 
 
+@app.put("/cotizaciones/{item_id}")
+def actualizar_cotizacion(item_id: str, data: dict):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    data["fecha_modificacion"] = datetime.utcnow().isoformat()
+    result = db.cotizaciones.update_one({"_id": oid}, {"$set": data})
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+
+    return {"success": True}
+
+
+@app.delete("/cotizaciones/{item_id}")
+def eliminar_cotizacion(item_id: str):
+    try:
+        oid = ObjectId(item_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    db.cotizaciones.delete_one({"_id": oid})
+    return {"success": True}
+
+
 # =========================
 # CLIENTES
 # =========================
