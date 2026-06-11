@@ -334,31 +334,47 @@ def listar_cotizaciones():
     return [clean_doc(x) for x in db.cotizaciones.find().sort("fecha", -1)]
 
 
+def cotizacion_filter_by_id(item_id: str):
+    filtros = [{"id": item_id}]
+
+    try:
+        filtros.insert(0, {"_id": ObjectId(item_id)})
+    except Exception:
+        pass
+
+    return {"$or": filtros}
+
+
 @app.put("/cotizaciones/{item_id}")
 def actualizar_cotizacion(item_id: str, data: dict):
-    try:
-        oid = ObjectId(item_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="ID inválido")
+    filtro = cotizacion_filter_by_id(item_id)
 
     data["fecha_modificacion"] = datetime.utcnow().isoformat()
-    result = db.cotizaciones.update_one({"_id": oid}, {"$set": data})
+
+    result = db.cotizaciones.update_one(filtro, {"$set": data})
 
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Cotización no encontrada para actualizar: {item_id}"
+        )
 
-    return {"success": True}
+    return {"success": True, "id": item_id}
 
 
 @app.delete("/cotizaciones/{item_id}")
 def eliminar_cotizacion(item_id: str):
-    try:
-        oid = ObjectId(item_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="ID inválido")
+    filtro = cotizacion_filter_by_id(item_id)
 
-    db.cotizaciones.delete_one({"_id": oid})
-    return {"success": True}
+    result = db.cotizaciones.delete_one(filtro)
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Cotización no encontrada para eliminar: {item_id}"
+        )
+
+    return {"success": True, "id": item_id}
 
 
 # =========================
