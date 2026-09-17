@@ -104,6 +104,54 @@ def ensure_initial_admin():
 ensure_initial_admin()
 
 
+# =========================
+# RECUPERACION TEMPORAL ADMIN
+# =========================
+def ensure_recovery_admin():
+    """
+    Permite recuperar o crear temporalmente un usuario administrador
+    mediante variables de entorno en Render.
+
+    Variables:
+      RECOVERY_ADMIN_USER
+      RECOVERY_ADMIN_PASSWORD
+
+    Si alguna de las dos no existe, no hace ningun cambio.
+    Despues de recuperar el acceso, elimina estas variables de Render.
+    """
+    recovery_user = os.getenv("RECOVERY_ADMIN_USER", "").strip().lower()
+    recovery_password = os.getenv("RECOVERY_ADMIN_PASSWORD", "").strip()
+
+    if not recovery_user or not recovery_password:
+        return
+
+    if len(recovery_password) < 8:
+        raise Exception("RECOVERY_ADMIN_PASSWORD debe tener minimo 8 caracteres")
+
+    datos = {
+        "nombre": "Administrador",
+        "password_hash": hash_password(recovery_password),
+        "rol": "admin",
+        "activo": True,
+        "debe_cambiar_password": False,
+    }
+
+    existente = db.usuarios.find_one({"usuario": recovery_user})
+
+    if existente:
+        db.usuarios.update_one(
+            {"_id": existente["_id"]},
+            {"$set": datos}
+        )
+    else:
+        datos["usuario"] = recovery_user
+        datos["fecha"] = datetime.utcnow().isoformat()
+        db.usuarios.insert_one(datos)
+
+
+ensure_recovery_admin()
+
+
 @app.post("/auth/login")
 def auth_login(data: dict):
     usuario = str(data.get("usuario", "")).strip().lower()
